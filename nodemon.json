@@ -1,0 +1,12 @@
+{
+  "watch": ["src"],
+  "ext": "js,json",
+  "ignore": [
+    ".env",
+    "node_modules",
+    "logs",
+    "*.test.js"
+  ],
+  "delay": "1000",
+  "legacyWatch": true
+}
