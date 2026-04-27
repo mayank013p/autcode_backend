@@ -1,60 +1,87 @@
 const { HfInference } = require('@huggingface/inference');
 
 const hf = new HfInference(process.env.HF_TOKEN);
-const MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct";
+const PRIMARY_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct";
+const BACKUP_MODEL = "mistralai/Mistral-7B-Instruct-v0.3";
 
 class AIService {
     /**
      * Generate code notes based on problem title and code content
      */
     static async generateNotes(title, code, language) {
+        const aiPrompt = `
+        System: You are a technical documenter. Analyze the code and respond ONLY with a JSON object.
+        JSON Structure:
+        {
+            "summary": "one sentence",
+            "approach": "2-3 sentences",
+            "tags": ["tag1", "tag2"],
+            "difficulty": "Easy" | "Medium" | "Hard",
+            "topic": "Category",
+            "cleanedCode": "code with concise comments"
+        }
+
+        User:
+        Problem: ${title}
+        Language: ${language}
+        Code:
+        ${code}
+        `;
+
         try {
-            console.log(`[HF AI] Requesting analysis for: ${title} (${language})`);
+            console.log(`[AI] Requesting analysis for: ${title} (${language})`);
             
-            const response = await hf.chatCompletion({
-                model: MODEL_NAME,
-                messages: [
-                    {
-                        role: "system",
-                        content: `You are a technical documenter for a coding dashboard. 
-                        Analyze the code provided by the user. 
-                        Provide a response in strictly valid JSON format with the following keys:
-                        1. "summary": A one-sentence summary.
-                        2. "approach": A brief technical explanation.
-                        3. "tags": An array of technical tags.
-                        4. "difficulty": "Easy", "Medium", or "Hard".
-                        5. "topic": The primary category.
-                        6. "cleanedCode": A well-commented version of the code.
-                        Respond ONLY with JSON.`
-                    },
-                    {
-                        role: "user",
-                        content: `Problem: ${title}\nLanguage: ${language}\nCode:\n${code}`
-                    }
-                ],
-                max_tokens: 1000,
-                temperature: 0.1,
-            });
-
-            const text = response.choices[0].message.content;
-            console.log(`[HF AI] Raw response received (length: ${text.length})`);
-
-            // Extract JSON from the response
-            const jsonMatch = text.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) {
-                console.warn("[HF AI] Failed to find JSON in response:", text);
-                throw new Error("Failed to parse JSON from Hugging Face response");
+            let response;
+            try {
+                response = await hf.chatCompletion({
+                    model: PRIMARY_MODEL,
+                    messages: [{ role: "user", content: aiPrompt }],
+                    max_tokens: 2500, // Increased to prevent truncation
+                    temperature: 0.1,
+                });
+            } catch (err) {
+                console.warn(`[AI] Primary model failed, trying backup...`);
+                response = await hf.chatCompletion({
+                    model: BACKUP_MODEL,
+                    messages: [{ role: "user", content: aiPrompt }],
+                    max_tokens: 2500,
+                    temperature: 0.1,
+                });
             }
 
-            const parsed = JSON.parse(jsonMatch[0]);
-            console.log("[HF AI] Successfully parsed analysis JSON");
-            return parsed;
-        } catch (error) {
-            console.error("[HF AI ERROR]", error.message);
-            // Fallback content if AI fails
+            let text = response.choices[0].message.content.trim();
+            console.log(`[AI] Response received (length: ${text.length})`);
+
+            // Extract JSON block
+            const jsonStart = text.indexOf('{');
+            let jsonEnd = text.lastIndexOf('}');
+            
+            if (jsonStart === -1) throw new Error("No JSON start found");
+            
+            // If the JSON is cut off (missing closing brace), try to append it
+            if (jsonEnd === -1 || jsonEnd < jsonStart) {
+                console.warn("[AI] JSON seems truncated, attempting repair...");
+                text += '\n"}'; // Attempt to close potential open string and object
+                jsonEnd = text.lastIndexOf('}');
+            }
+
+            const jsonString = text.substring(jsonStart, jsonEnd + 1);
+            const parsed = JSON.parse(jsonString);
+            
             return {
-                summary: `Analysis of ${title || 'code'}.`,
-                approach: "Algorithm implementation focused on core logic.",
+                summary: parsed.summary || `Analysis of ${title}`,
+                approach: parsed.approach || "Algorithm implementation.",
+                tags: parsed.tags || [language, "algorithm"],
+                difficulty: parsed.difficulty || "Medium",
+                topic: parsed.topic || "General",
+                cleanedCode: parsed.cleanedCode || code
+            };
+
+        } catch (error) {
+            console.error("[AI ERROR]", error.message);
+            return {
+                summary: `Note for ${title}.`,
+                approach: "Analysis was partially completed but hit a parsing limit.",
                 tags: [language || "coding", "algorithm"],
                 difficulty: "Medium",
                 topic: "General",
